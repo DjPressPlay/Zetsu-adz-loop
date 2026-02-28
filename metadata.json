@@ -1,0 +1,5 @@
+{
+  "name": "Zetsu ADs Loop",
+  "description": "Autonomous advertising command center. Deploy AI-driven ad pipelines that read websites and post content indefinitely.",
+  "requestFramePermissions": []
+}
