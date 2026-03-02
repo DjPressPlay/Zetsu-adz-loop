@@ -46,12 +46,16 @@ export default function App() {
   }, []);
 
   const fetchData = async () => {
-    const [sRes, pRes] = await Promise.all([
-      fetch('/api/pipelines'),
-      fetch('/api/activity')
-    ]);
-    setSites(await sRes.json());
-    setPosts(await pRes.json());
+    try {
+      const [sRes, pRes] = await Promise.all([
+        fetch('/api/pipelines'),
+        fetch('/api/activity')
+      ]);
+      if (sRes.ok) setSites(await sRes.json());
+      if (pRes.ok) setPosts(await pRes.json());
+    } catch (err) {
+      console.error('Failed to fetch data:', err);
+    }
   };
 
   const handleAddSite = async (e: React.FormEvent) => {

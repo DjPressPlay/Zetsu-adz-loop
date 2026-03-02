@@ -1,0 +1,29 @@
+[build]
+  command = "npm run build"
+  publish = "dist"
+
+[functions]
+  directory = "netlify/functions"
+  node_bundler = "esbuild"
+
+# Order matters: specific routes before general ones
+[[redirects]]
+  from = "/api/pipelines/:id"
+  to = "/.netlify/functions/pipeline-by-id?id=:id"
+  status = 200
+
+[[redirects]]
+  from = "/api/pipelines"
+  to = "/.netlify/functions/pipelines"
+  status = 200
+
+[[redirects]]
+  from = "/api/activity"
+  to = "/.netlify/functions/activity"
+  status = 200
+
+# SPA fallback — must be last
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
