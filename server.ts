@@ -2,50 +2,81 @@ import express from "express";
 import { createServer as createViteServer } from "vite";
 import path from "path";
 import { fileURLToPath } from "url";
-import Database from "better-sqlite3";
+import crypto from "crypto";
+import { createClient } from '@supabase/supabase-js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const db = new Database("adbot.db");
+// Supabase configuration
+const supabaseUrl = process.env.SUPABASE_URL || '';
+const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+const supabase = createClient(supabaseUrl, supabaseKey);
 
-// Initialize database with pipelines and logs
-db.exec(`
-  CREATE TABLE IF NOT EXISTS pipelines (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT,
-    url TEXT,
-    social_handle TEXT,
-    platform TEXT,
-    access_token TEXT,
-    target_posts INTEGER,
-    posts_completed INTEGER DEFAULT 0,
-    status TEXT DEFAULT 'ACTIVE',
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    last_run DATETIME
-  );
-`);
+// Encryption configuration
+const ALGORITHM = 'aes-256-cbc';
+const ENCRYPTION_KEY = process.env.CRYPTO_KEY || 'zetsu-ads-loop-fallback-key-32-chars'; // Must be 32 chars
+const IV_LENGTH = 16;
 
-// Migration: Add access_token if missing
-try {
-  db.prepare("ALTER TABLE pipelines ADD COLUMN access_token TEXT").run();
-} catch (e) {}
+function encrypt(text: string) {
+  if (!text) return null;
+  const iv = crypto.randomBytes(IV_LENGTH);
+  const cipher = crypto.createCipheriv(ALGORITHM, Buffer.from(ENCRYPTION_KEY.substring(0, 32)), iv);
+  let encrypted = cipher.update(text);
+  encrypted = Buffer.concat([encrypted, cipher.final()]);
+  return iv.toString('hex') + ':' + encrypted.toString('hex');
+}
 
-try {
-  db.prepare("ALTER TABLE pipelines ADD COLUMN posts_per_day INTEGER DEFAULT 3").run();
-} catch (e) {}
+function decrypt(text: string) {
+  if (!text) return null;
+  try {
+    const textParts = text.split(':');
+    const iv = Buffer.from(textParts.shift()!, 'hex');
+    const encryptedText = Buffer.from(textParts.join(':'), 'hex');
+    const decipher = crypto.createDecipheriv(ALGORITHM, Buffer.from(ENCRYPTION_KEY.substring(0, 32)), iv);
+    let decrypted = decipher.update(encryptedText);
+    decrypted = Buffer.concat([decrypted, decipher.final()]);
+    return decrypted.toString();
+  } catch (e) {
+    return "[DECRYPTION_FAILED]";
+  }
+}
 
-db.exec(`
-  CREATE TABLE IF NOT EXISTS activity_log (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    pipeline_id INTEGER,
-    type TEXT, -- 'GENERATION', 'POSTING', 'ANALYSIS'
-    message TEXT,
-    metadata TEXT, -- JSON string for ad content
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY(pipeline_id) REFERENCES pipelines(id)
-  );
-`);
+// Autonomous Engine Logic (Extracted for Serverless/Cron compatibility)
+async function runAutonomousCycle() {
+  const { data: pipelines, error } = await supabase
+    .from('pipelines')
+    .select('*')
+    .eq('status', 'ACTIVE');
+
+  if (error || !pipelines) {
+    console.error('[ADBOT] Error fetching pipelines:', error);
+    return;
+  }
+
+  for (const p of pipelines) {
+    const lastRun = p.last_run ? new Date(p.last_run).getTime() : 0;
+    const now = Date.now();
+    
+    // Check if it's been at least 1 hour since the last run
+    if (now - lastRun > 3600000) {
+      const decryptedToken = decrypt(p.access_token);
+      console.log(`[ADBOT] Executing autonomous cycle for: ${p.url} using token: ${decryptedToken?.substring(0, 8)}...`);
+      
+      // In a real app, we would call Gemini here and then the Social API
+      // For this tool, we'll trigger the activity log which represents the "Post"
+      
+      // Update last_run and posts_completed
+      await supabase
+        .from('pipelines')
+        .update({ 
+          posts_completed: (p.posts_completed || 0) + 1,
+          last_run: new Date().toISOString()
+        })
+        .eq('id', p.id);
+    }
+  }
+}
 
 async function startServer() {
   const app = express();
@@ -55,75 +86,115 @@ async function startServer() {
   app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
   // Pipeline Management
-  app.get("/api/pipelines", (req, res) => {
-    const pipelines = db.prepare("SELECT * FROM pipelines ORDER BY created_at DESC").all();
-    res.json(pipelines);
+  app.get("/api/pipelines", async (req, res) => {
+    const { data, error } = await supabase
+      .from('pipelines')
+      .select('*')
+      .order('created_at', { ascending: false });
+
+    if (error) return res.status(500).json({ error: error.message });
+
+    // Mask tokens for the UI
+    const maskedPipelines = data.map(p => ({
+      ...p,
+      access_token: p.access_token ? "••••••••••••••••" : null
+    }));
+    res.json(maskedPipelines);
   });
 
-  app.post("/api/pipelines", (req, res) => {
+  app.post("/api/pipelines", async (req, res) => {
     const { name, url, social_handle, platform, target_posts, access_token, posts_per_day } = req.body;
-    const info = db.prepare(
-      "INSERT INTO pipelines (name, url, social_handle, platform, target_posts, access_token, posts_per_day) VALUES (?, ?, ?, ?, ?, ?, ?)"
-    ).run(name, url, social_handle, platform, target_posts, access_token, posts_per_day || 3);
-    res.json({ id: info.lastInsertRowid });
+    const encryptedToken = encrypt(access_token);
+    
+    const { data, error } = await supabase
+      .from('pipelines')
+      .insert([{
+        name,
+        url,
+        social_handle,
+        platform,
+        target_posts,
+        access_token: encryptedToken,
+        posts_per_day: posts_per_day || 3
+      }])
+      .select();
+
+    if (error) return res.status(500).json({ error: error.message });
+    res.json({ id: data[0].id });
   });
 
-  app.patch("/api/pipelines/:id", (req, res) => {
+  app.patch("/api/pipelines/:id", async (req, res) => {
     const { posts_per_day } = req.body;
-    db.prepare("UPDATE pipelines SET posts_per_day = ? WHERE id = ?").run(posts_per_day, req.params.id);
+    const { error } = await supabase
+      .from('pipelines')
+      .update({ posts_per_day })
+      .eq('id', req.params.id);
+
+    if (error) return res.status(500).json({ error: error.message });
     res.json({ success: true });
   });
 
-  app.delete("/api/pipelines/:id", (req, res) => {
-    db.prepare("DELETE FROM pipelines WHERE id = ?").run(req.params.id);
-    db.prepare("DELETE FROM activity_log WHERE pipeline_id = ?").run(req.params.id);
+  app.delete("/api/pipelines/:id", async (req, res) => {
+    // Delete activity logs first
+    await supabase.from('activity_log').delete().eq('pipeline_id', req.params.id);
+    // Delete pipeline
+    const { error } = await supabase.from('pipelines').delete().eq('id', req.params.id);
+
+    if (error) return res.status(500).json({ error: error.message });
     res.json({ success: true });
   });
 
   // Activity Logs
-  app.get("/api/activity", (req, res) => {
-    const logs = db.prepare(`
-      SELECT l.*, p.name as pipeline_name, p.platform 
-      FROM activity_log l 
-      JOIN pipelines p ON l.pipeline_id = p.id 
-      ORDER BY l.created_at DESC 
-      LIMIT 50
-    `).all();
-    res.json(logs);
+  app.get("/api/activity", async (req, res) => {
+    const { data, error } = await supabase
+      .from('activity_log')
+      .select(`
+        *,
+        pipelines (
+          name,
+          platform
+        )
+      `)
+      .order('created_at', { ascending: false })
+      .limit(50);
+
+    if (error) return res.status(500).json({ error: error.message });
+    
+    // Flatten the result to match the previous structure
+    const flattenedLogs = data.map(l => ({
+      ...l,
+      pipeline_name: l.pipelines?.name,
+      platform: l.pipelines?.platform
+    }));
+    
+    res.json(flattenedLogs);
   });
 
-  app.post("/api/activity", (req, res) => {
+  app.post("/api/activity", async (req, res) => {
     const { pipeline_id, type, message, metadata } = req.body;
-    db.prepare(
-      "INSERT INTO activity_log (pipeline_id, type, message, metadata) VALUES (?, ?, ?, ?)"
-    ).run(pipeline_id, type, message, metadata);
+    
+    const { error } = await supabase
+      .from('activity_log')
+      .insert([{ pipeline_id, type, message, metadata }]);
+
+    if (error) return res.status(500).json({ error: error.message });
     
     if (type === 'POSTING') {
-      db.prepare("UPDATE pipelines SET posts_completed = posts_completed + 1, last_run = CURRENT_TIMESTAMP WHERE id = ?")
-        .run(pipeline_id);
+      // Update pipeline stats
+      const { data: pipeline } = await supabase.from('pipelines').select('posts_completed').eq('id', pipeline_id).single();
+      await supabase
+        .from('pipelines')
+        .update({ 
+          posts_completed: (pipeline?.posts_completed || 0) + 1,
+          last_run: new Date().toISOString()
+        })
+        .eq('id', pipeline_id);
     }
     res.json({ success: true });
   });
 
-  // Autonomous Engine (Server-Side)
-  // This runs every 30 seconds to check if any pipeline needs a new post
-  setInterval(async () => {
-    const pipelines = db.prepare("SELECT * FROM pipelines WHERE status = 'ACTIVE'").all();
-    
-    for (const p of pipelines) {
-      // Check if it's been at least 1 hour since the last run (or if it's never run)
-      const lastRun = p.last_run ? new Date(p.last_run).getTime() : 0;
-      const now = Date.now();
-      
-      if (now - lastRun > 3600000) { // 1 hour interval
-        console.log(`[ADBOT] Executing autonomous cycle for: ${p.url} using token: ${p.access_token?.substring(0, 8)}...`);
-        
-        // In a real app, we would call Gemini here and then the Social API
-        // For this tool, we'll trigger the activity log which represents the "Post"
-        // The frontend will see this update via the polling fetchData
-      }
-    }
-  }, 30000);
+  // Keep the interval for local development, but it's ready for Netlify Scheduled Functions
+  setInterval(runAutonomousCycle, 30000);
 
   // Vite middleware for development
   if (process.env.NODE_ENV !== "production") {
