@@ -41,16 +41,8 @@ Set these in Netlify (Site settings > Environment variables) or in a local `.env
 | `SUPABASE_SERVICE_ROLE_KEY` | Supabase service role key (server-side only) |
 | `CRYPTO_KEY` | 32-character key for AES-256-CBC token encryption |
 
-### Local Development
 
-```bash
-npm install
-npm run dev
-```
 
-### Deploy to Netlify
-
-Push to your connected Git repository — Netlify builds automatically using `vite build` and deploys the `dist/` folder with serverless functions.
 
 ## Project Structure
 
