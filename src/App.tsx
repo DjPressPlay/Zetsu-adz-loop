@@ -46,16 +46,12 @@ export default function App() {
   }, []);
 
   const fetchData = async () => {
-    try {
-      const [sRes, pRes] = await Promise.all([
-        fetch('/api/pipelines'),
-        fetch('/api/activity')
-      ]);
-      if (sRes.ok) setSites(await sRes.json());
-      if (pRes.ok) setPosts(await pRes.json());
-    } catch (err) {
-      console.error('Failed to fetch data:', err);
-    }
+    const [sRes, pRes] = await Promise.all([
+      fetch('/api/pipelines'),
+      fetch('/api/activity')
+    ]);
+    setSites(await sRes.json());
+    setPosts(await pRes.json());
   };
 
   const handleAddSite = async (e: React.FormEvent) => {
@@ -96,14 +92,16 @@ export default function App() {
 
     try {
       updateStage('🔍 Reading Website Content...');
+      await new Promise(r => setTimeout(r, 2000));
 
       updateStage('🧠 Generating Ad Variants...');
       const ads = await generateAdsFromUrl(site.url, 1);
-      if (!ads.length) throw new Error('No ads generated');
       const ad = ads[0];
+      await new Promise(r => setTimeout(r, 2000));
 
       updateStage('🎨 Synthesizing Visual Assets...');
       const imageUrl = await generateAdImage(ad.imagePrompt);
+      await new Promise(r => setTimeout(r, 2000));
 
       updateStage('🚀 Simulating API Deployment...');
       await fetch('/api/activity', {
@@ -116,7 +114,7 @@ export default function App() {
           metadata: JSON.stringify({ ...ad, imageUrl })
         })
       });
-
+      
       updateStage('✅ Deployment Successful');
       fetchData();
       setTimeout(() => {
@@ -127,14 +125,14 @@ export default function App() {
         });
       }, 3000);
     } catch (err) {
-      updateStage('❌ Demo Failed: ' + (err instanceof Error ? err.message : err));
+      updateStage('❌ Demo Failed: ' + err);
       setTimeout(() => {
         setDemoStages(prev => {
           const next = { ...prev };
           delete next[site.id];
           return next;
         });
-      }, 5000);
+      }, 3000);
     }
   };
 
